@@ -1,4 +1,4 @@
-# metalens-lut
+# meep-metalens-engine
 
 Meep (FDTD) engine for unit-cell look-up tables (LUTs) of dielectric
 nanocylinder metasurfaces, plus the target phase profile of a metalens.
