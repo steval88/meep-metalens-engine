@@ -572,6 +572,15 @@ def main():
     jobs = [(res, H, r) for res in args.res for H in args.heights for r in radii]
     # every rank decides from the same files -> identical job lists everywhere
     todo = [j for j in jobs if not os.path.exists(job_file(run_dir, *j))]
+    # dynamic scheduling: groups claim jobs one at a time from a shared queue.
+    # Largest radii first: the slow, resonant runs start early instead of
+    # piling up at the end of one group's list.
+    todo.sort(key=lambda j: (-j[2], j[0], j[1]))
+    claim_dir = os.path.join(run_dir, "claims")
+    if mp.am_really_master():
+        os.makedirs(claim_dir, exist_ok=True)
+        for f in os.listdir(claim_dir):          # stale claims of an interrupted run
+            os.remove(os.path.join(claim_dir, f))
     barrier()
 
     G = args.groups
@@ -582,8 +591,6 @@ def main():
         gid = mp.divide_parallel_processes(G)
     else:
         gid = 0
-    # contiguous chunks: each group touches few (res, H) pairs -> few normalizations
-    mine = [j for k, j in enumerate(todo) if (k * G) // max(1, len(todo)) == gid]
 
     log_path = os.path.join(run_dir, "logs", f"group{gid:02d}.log")
 
@@ -596,10 +603,34 @@ def main():
             with open(log_path, "a") as fh:
                 fh.write(line + "\n")
 
-    log(f"{len(jobs)} jobs total, {len(todo)} to do, {len(mine)} in this group "
-        f"({nproc // G} procs/group)")
+    def claim(job):
+        """True if this group wins the job. The group master creates the claim
+        file atomically (O_EXCL); after a group barrier every rank of the group
+        reads the owner from the file, so the whole group agrees."""
+        res, H, r = job
+        path = os.path.join(claim_dir, f"res{res:03d}_H{round(H*1000):04d}_r{r*1000:07.2f}")
+        if mp.am_master():
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(gid).encode())
+                os.close(fd)
+            except FileExistsError:
+                pass
+        mp.all_wait()                            # barrier within this group only
+        try:
+            with open(path) as fh:
+                return fh.read().strip() == str(gid)
+        except FileNotFoundError:
+            return False
+
+    log(f"{len(jobs)} jobs total, {len(todo)} to do, {G} groups x {nproc // G} procs, "
+        f"dynamic queue (largest radius first)")
     cache = {}
-    for (res, H, r) in mine:
+    mine = []
+    for (res, H, r) in todo:
+        if not claim((res, H, r)):
+            continue
+        mine.append((res, H, r))
         cell = UnitCell(args, res, H)
         if (res, H) not in cache:
             norm, inc = cell.normalization()
