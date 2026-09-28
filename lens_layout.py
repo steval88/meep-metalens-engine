@@ -3,9 +3,13 @@
 lens_layout.py - map a metalens phase profile onto a unit-cell LUT and check it.
 
 Steps
-  1. Target: hyperbolic phase DELAY of an on-axis lens (focus in air)
-         phi_t(r) = (2 pi / lambda) * ( sqrt(R^2 + f^2) - sqrt(r^2 + f^2) ),   f = N * D
-     same sign convention as the LUT (more optical path -> larger phase).
+  1. Target: standard hyperbolic profile of an on-axis lens (focus in air)
+         phi_t(r) = -(2 pi / lambda) * ( sqrt(r^2 + f^2) - f ),   f = N * D
+     (phi_t(0) = 0, decreasing outwards), plus an optional global offset phi0
+     (default 0). Wrapped phases are reported in (0, 2 pi], so the lens centre
+     is at 2 pi and the phase decreases outwards (converging lens).
+     Same sign convention as the LUT (more optical path -> larger phase, Meep's
+     exp(-i w t)): the centre needs the most delay.
   2. LUT: T(r_p) and unwrapped phase(r_p) from lut.csv (written by lut_sweep.py),
      linearly interpolated onto candidate pillar radii (--r_step, e.g. the
      fabrication grid). Complex transmission t(r_p) = sqrt(T) exp(i phase).
@@ -13,8 +17,9 @@ Steps
      site at the lens centre) gets the pillar radius minimising
          | t(r_p) - exp(i (phi_t + phi0)) |
      i.e. best phase match with a preference for high transmission. The global
-     offset phi0 is free (a constant phase does not change the focus) and is
-     chosen to maximise the overlap  |< t exp(-i(phi_t + phi0)) >|^2 .
+     offset phi0 does not change the focus. Default --phi0 0 is the textbook
+     profile; --phi0 auto instead picks the offset that maximises the overlap
+     |< t exp(-i(phi_t + phi0)) >|^2 with this LUT (reported, for comparison).
   4. Check: scalar angular-spectrum propagation of the designed field (one
      complex value per site, zero outside the aperture) to the focal region,
      compared with an ideal lens (unit amplitude, exact phase) of the same
@@ -52,6 +57,9 @@ def parse_args():
                     help="pillar-radius grid (um) for the choice, e.g. fabrication step")
     ap.add_argument("--root", default="layouts", help="parent folder for outputs")
     ap.add_argument("--tag", default="")
+    ap.add_argument("--phi0", default="0",
+                    help="global phase offset (rad) added to the standard profile "
+                         "(default 0), or 'auto' to optimise it for the LUT")
     ap.add_argument("--no_propagate", action="store_true", help="skip the focusing check")
     return ap.parse_args()
 
@@ -73,9 +81,20 @@ def read_lut(path):
     return meta, r_um[order], T[order], ph[order], hit[order]
 
 
+def wrap_2pi(x):
+    """Wrap into (0, 2 pi]: 0 -> 2 pi, so a converging lens starts at 2 pi and decreases."""
+    return 2 * np.pi - np.mod(-np.asarray(x), 2 * np.pi)
+
+
+def target_slope(rho, f, wl):
+    """d phi_t / d r (rad/um) of the hyperbolic profile."""
+    k = 2 * np.pi / wl
+    return -k * rho / np.sqrt(rho**2 + f**2)
+
+
 def target_phase(rho, R, f, wl):
     k = 2 * np.pi / wl
-    return k * (np.sqrt(R**2 + f**2) - np.sqrt(rho**2 + f**2))
+    return -k * (np.sqrt(rho**2 + f**2) - f)
 
 
 def main():
@@ -117,9 +136,12 @@ def main():
     def overlap(idx, phi0):
         return abs(np.mean(t_c[idx] * np.exp(-1j * (phi_t + phi0)))) ** 2
 
-    offsets = np.linspace(0, 2 * np.pi, 360, endpoint=False)
-    scores = [overlap(assign(p0), p0) for p0 in offsets]
-    phi0 = offsets[int(np.argmax(scores))]
+    if str(a.phi0).lower() == "auto":
+        offsets = np.linspace(0, 2 * np.pi, 720, endpoint=False)
+        scores = [overlap(assign(p0), p0) for p0 in offsets]
+        phi0 = offsets[int(np.argmax(scores))]
+    else:
+        phi0 = float(a.phi0) % (2 * np.pi)
     idx = assign(phi0)
     r_site, T_site, t_site = r_c[idx], T_c[idx], t_c[idx]
     err = np.angle(t_site * np.exp(-1j * (phi_t + phi0)))       # realised - target, wrapped
@@ -134,12 +156,12 @@ def main():
                "created": datetime.datetime.now().isoformat(timespec="seconds")},
               open(os.path.join(out, "config.json"), "w"), indent=2)
     np.savetxt(os.path.join(out, "sites.csv"),
-               np.column_stack([xs, ys, rhos, r_site * 1e3, np.mod(phi_t + phi0, 2 * np.pi),
-                                np.mod(np.angle(t_site), 2 * np.pi), err, T_site]),
+               np.column_stack([xs, ys, rhos, r_site * 1e3, wrap_2pi(phi_t + phi0),
+                                wrap_2pi(np.angle(t_site)), err, T_site]),
                delimiter=",", fmt="%.6f",
                header=(f"D={a.D} um, N={a.N}, f={f} um, wl={wl} um, P={P} um, phi0={phi0:.6f} rad, "
                        f"LUT={a.lut}\n"
-                       "x_um,y_um,rho_um,pillar_radius_nm,target_phase_rad,realised_phase_rad,"
+                       "x_um,y_um,rho_um,pillar_radius_nm,target_phase_rad(0,2pi],realised_phase_rad(0,2pi],"
                        "phase_error_rad,T"))
 
     # ---- focusing check (scalar angular spectrum) ---------------------------
@@ -157,7 +179,16 @@ def main():
         f"phase span {span:.3f} rad ({span/(2*np.pi):.2f} x 2pi), "
         f"{int(hit.sum())} point(s) flagged hit_max_time",
         f"     candidate radii every {a.r_step*1e3:.1f} nm (linear interpolation between simulated points)",
-        f"global phase offset phi0 = {phi0:.3f} rad",
+        f"target: phi(r) = -(2pi/lambda)(sqrt(r^2+f^2) - f) + phi0, "
+        f"phi0 = {phi0:.3f} rad = {phi0/np.pi:.3f} pi "
+        f"({'optimised for this LUT' if str(a.phi0).lower() == 'auto' else 'fixed by --phi0'})",
+        f"phase range phi(0) - phi(R) = {abs(target_phase(R, R, f, wl)):.3f} rad "
+        f"= {abs(target_phase(R, R, f, wl))/(2*np.pi):.3f} x 2pi "
+        f"({int(np.floor(abs(target_phase(R, R, f, wl))/(2*np.pi)))} full zones)",
+        f"slope dphi/dr: {target_slope(R/2, f, wl):.4f} rad/um at r = R/2, "
+        f"{target_slope(R, f, wl):.4f} rad/um at r = R "
+        f"(= {abs(target_slope(R, f, wl))*P:.3f} rad per period, "
+        f"{2*np.pi/(abs(target_slope(R, f, wl))*P):.1f} sites per 2pi zone at the rim)",
         f"phase error: RMS {np.sqrt(np.mean(err**2)):.3f} rad, max |err| {np.max(np.abs(err)):.3f} rad",
         f"transmission over sites: mean {T_site.mean():.4f}, min {T_site.min():.4f}",
         f"overlap with ideal unit-amplitude lens |<t e^-i phi_t>|^2 = {ovl:.4f}",
@@ -269,25 +300,38 @@ def plots(out, a, wl, P, f, R, xs, ys, rhos, phi_t, phi0, t_site, r_site, T_site
     sel = (np.abs(ys) < 1e-9) & (xs >= -1e-9)
     o = np.argsort(xs[sel])
     xr = xs[sel][o]
-    fig, ax = plt.subplots(2, 2, figsize=(12, 8), dpi=150)
+    fig, ax = plt.subplots(3, 2, figsize=(12, 11.5), dpi=150)
     rr = np.linspace(0, R, 2000)
-    ax[0, 0].plot(rr, np.mod(target_phase(rr, R, f, wl) + phi0, 2 * np.pi), c=MUTED, lw=1,
-                  label="target")
-    ax[0, 0].plot(xr, np.mod(np.angle(t_site[sel][o]), 2 * np.pi), "o", c=BLUE, ms=3.5,
+    phi_rr = target_phase(rr, R, f, wl) + phi0
+    rng = abs(target_phase(R, R, f, wl))
+    # (row 0) the two quantities that define the lens: phase range and slope
+    ax[0, 0].plot(rr, phi_rr, c=BLUE, lw=2)
+    ax[0, 0].set(xlabel="radial position (µm)", ylabel="φ(r) (rad)",
+                 title=f"Target phase, unwrapped\nφ(0) − φ(R) = {rng:.2f} rad "
+                       f"({rng/(2*np.pi):.2f} × 2π)")
+    sl = target_slope(rr, f, wl)
+    ax[0, 1].plot(rr, sl, c=BLUE, lw=2)
+    ax[0, 1].set(xlabel="radial position (µm)", ylabel="dφ/dr (rad/µm)",
+                 title=f"Target slope: {sl[-1]:.3f} rad/µm at the rim\n"
+                       f"({abs(sl[-1])*P:.3f} rad per {P*1e3:.0f} nm period)")
+    # (row 1) wrapped phase at the sites and chosen pillar radius
+    ax[1, 0].plot(rr, wrap_2pi(phi_rr), c=MUTED, lw=1, label="target")
+    ax[1, 0].plot(xr, wrap_2pi(np.angle(t_site[sel][o])), "o", c=BLUE, ms=3.5,
                   label="realised (LUT)")
-    ax[0, 0].set(xlabel="radial position (µm)", ylabel="phase (mod 2π)", ylim=(0, 2 * np.pi),
-                 title="Phase at the lattice sites")
-    ax[0, 0].yaxis.set_major_locator(MultipleLocator(np.pi / 2))
-    ax[0, 0].yaxis.set_major_formatter(FuncFormatter(pi_fmt))
-    ax[0, 0].legend(frameon=False, fontsize=8, loc="lower left")
-    ax[0, 1].plot(xr, r_site[sel][o] * 1e3, "o-", c=BLUE, ms=3.5, lw=1)
-    ax[0, 1].set(xlabel="radial position (µm)", ylabel="pillar radius (nm)",
+    ax[1, 0].set(xlabel="radial position (µm)", ylabel="phase, wrapped to (0, 2π]",
+                 ylim=(0, 2 * np.pi + 0.05), title="Phase at the lattice sites")
+    ax[1, 0].yaxis.set_major_locator(MultipleLocator(np.pi / 2))
+    ax[1, 0].yaxis.set_major_formatter(FuncFormatter(pi_fmt))
+    ax[1, 0].legend(frameon=False, fontsize=8, loc="lower left")
+    ax[1, 1].plot(xr, r_site[sel][o] * 1e3, "o-", c=BLUE, ms=3.5, lw=1)
+    ax[1, 1].set(xlabel="radial position (µm)", ylabel="pillar radius (nm)",
                  title="Pillar radius")
-    ax[1, 0].plot(xr, T_site[sel][o], "o-", c=BLUE, ms=3.5, lw=1)
-    ax[1, 0].set(xlabel="radial position (µm)", ylabel="T", ylim=(0, 1.05),
+    # (row 2) transmission and phase error
+    ax[2, 0].plot(xr, T_site[sel][o], "o-", c=BLUE, ms=3.5, lw=1)
+    ax[2, 0].set(xlabel="radial position (µm)", ylabel="T", ylim=(0, 1.05),
                  title="Transmission of the chosen pillar")
-    ax[1, 1].hist(err, bins=60, color=BLUE)
-    ax[1, 1].set(xlabel="phase error, realised − target (rad)", ylabel="number of sites",
+    ax[2, 1].hist(err, bins=60, color=BLUE)
+    ax[2, 1].set(xlabel="phase error, realised − target (rad)", ylabel="number of sites",
                  title=f"Phase error, all {err.size} sites (RMS {np.sqrt(np.mean(err**2)):.3f} rad)")
     for x in ax.flat:
         grid(x)
