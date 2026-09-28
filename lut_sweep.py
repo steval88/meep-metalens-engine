@@ -48,6 +48,7 @@ import argparse
 import datetime
 import json
 import os
+import sys
 import time
 
 import numpy as np
@@ -307,6 +308,19 @@ def lut_table(recs):
     return r, T, R, T0, ph
 
 
+# categorical palette (validated for colour-vision deficiency, light surface);
+# markers are the secondary encoding so no series relies on colour alone.
+PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300",
+           "#4a3aa7", "#e34948"]
+MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
+
+
+def series_style(i):
+    """Fixed-order colour/marker for the i-th series (wraps after 8 with dashes)."""
+    return dict(color=PALETTE[i % 8], marker=MARKERS[i % 8],
+                ls="-" if i < 8 else "--")
+
+
 def summarize(args, run_dir):
     import matplotlib
     matplotlib.use("Agg")
@@ -343,25 +357,47 @@ def summarize(args, run_dir):
                                         [x["hit_max_time"] for x in recs]]),
                        delimiter=",", header=hdr, fmt="%.6f")
 
+            title = (f"H = {H*1e3:.0f} nm, P = {args.period*1e3:.0f} nm, "
+                     f"λ = {args.wl*1e3:.0f} nm, res = {res}/µm")
+            blue = PALETTE[0]
+            # (a) the LUT itself: transmission and phase
             fig, ax = plt.subplots(1, 2, figsize=(11, 4), dpi=150)
-            ax[0].plot(r * 1e3, T, "o-", c="#2a6fdb", lw=2, ms=5, label="T")
-            ax[0].plot(r * 1e3, R, "s-", c="#d9822b", lw=1.5, ms=4, label="R")
-            ax[0].plot(r * 1e3, R + T, "-", c=MUTED, lw=1, label="R+T")
+            ax[0].plot(r * 1e3, T, "o-", c=blue, lw=2, ms=5)
             ax[0].axhline(norm["T_sub"], ls="--", c=MUTED, lw=0.8)
-            ax[0].set(xlabel="radius (nm)", ylabel="fraction of incident power",
-                      ylim=(0, 1.05), title="Transmission / reflection")
-            ax[0].legend(frameon=False, loc="center left")
-            ax[1].plot(r * 1e3, ph - ph[0], "o-", c="#2a6fdb", lw=2, ms=5)
+            ax[0].text(r[0] * 1e3, norm["T_sub"] - 0.02, "bare substrate", color=MUTED,
+                       fontsize=7, va="top")
+            ax[0].set(xlabel="radius (nm)", ylabel="T (fraction of incident power)",
+                      ylim=(0, 1.05), title="Transmission")
+            ax[1].plot(r * 1e3, ph - ph[0], "o-", c=blue, lw=2, ms=5)
             ax[1].axhline(2 * np.pi, ls="--", c=MUTED, lw=0.8)
             ax[1].set(xlabel="radius (nm)", ylabel="phase rel. to r_min (rad)",
                       title="Phase (unwrapped)")
             if steps.size and steps.max() > 2.5:
                 ax[1].text(0.02, 0.95, "warning: |Δφ| > 2.5 rad between radii - refine dr",
                            transform=ax[1].transAxes, color="#b3261e", fontsize=8, va="top")
-            fig.suptitle(f"H = {H*1e3:.0f} nm, P = {args.period*1e3:.0f} nm, "
-                         f"λ = {args.wl*1e3:.0f} nm, res = {res}/µm")
+            fig.suptitle(title)
             fig.tight_layout()
             fig.savefig(os.path.join(out, "lut.png"))
+            plt.close(fig)
+
+            # (b) reflection and energy-conservation check, separate figure
+            fig, ax = plt.subplots(1, 2, figsize=(11, 4), dpi=150)
+            ax[0].plot(r * 1e3, R, "s-", c=PALETTE[1], lw=2, ms=5)
+            ax[0].axhline(norm["R_sub"], ls="--", c=MUTED, lw=0.8)
+            ax[0].set(xlabel="radius (nm)", ylabel="R (fraction of incident power)",
+                      ylim=(0, max(0.1, 1.1 * R.max())), title="Reflection")
+            ax[1].plot(r * 1e3, R + T - 1, "o-", c=MUTED, lw=1.5, ms=4)
+            ax[1].axhline(0, c=MUTED, lw=0.8)
+            flag = np.array([x["hit_max_time"] for x in recs], bool)
+            if flag.any():
+                ax[1].plot(r[flag] * 1e3, (R + T - 1)[flag], "x", c="#b3261e", ms=9,
+                           label="hit max_time")
+                ax[1].legend(frameon=False, fontsize=8)
+            ax[1].set(xlabel="radius (nm)", ylabel="R + T − 1",
+                      title="Energy conservation check (should be ≈ 0)")
+            fig.suptitle(title)
+            fig.tight_layout()
+            fig.savefig(os.path.join(out, "lut_reflection.png"))
             plt.close(fig)
 
     # ---- height sweep summary (per resolution) ----------------------------
@@ -370,25 +406,35 @@ def summarize(args, run_dir):
         if len(Hs) < 2:
             continue
         rows = []
-        cmap = plt.get_cmap("Blues")
-        fig, ax = plt.subplots(1, 2, figsize=(11, 4), dpi=150)
+        fig, ax = plt.subplots(1, 2, figsize=(12, 4.5), dpi=150)
+        figR, axR = plt.subplots(figsize=(6.5, 4.5), dpi=150)
         for i, H in enumerate(Hs):
             r, T, R, ph, norm = luts[(res, H)]
             span = ph.max() - ph.min()
             rows.append([H * 1e3, span, span / (2 * np.pi), T.min(), T.mean(),
                          np.max(np.abs(R + T - 1)), r[np.argmin(T)] * 1e3])
-            c = cmap(0.35 + 0.65 * i / max(1, len(Hs) - 1))
-            ax[0].plot(r * 1e3, T, "o-", c=c, lw=1.5, ms=3, label=f"{H*1e3:.0f} nm")
-            ax[1].plot(r * 1e3, ph - ph[0], "o-", c=c, lw=1.5, ms=3)
+            st = series_style(i)
+            lab = f"{H*1e3:.0f} nm"
+            ax[0].plot(r * 1e3, T, lw=1.6, ms=5, label=lab, **st)
+            ax[1].plot(r * 1e3, ph - ph[0], lw=1.6, ms=5, label=lab, **st)
+            axR.plot(r * 1e3, R, lw=1.6, ms=5, label=lab, **st)
         ax[0].set(xlabel="radius (nm)", ylabel="T", ylim=(0, 1.05), title="Transmission")
-        ax[0].legend(title="H", frameon=False, fontsize=7, loc="lower left")
         ax[1].axhline(2 * np.pi, ls="--", c=MUTED, lw=0.8)
         ax[1].set(xlabel="radius (nm)", ylabel="phase rel. to r_min (rad)",
                   title="Phase (unwrapped)")
+        # one legend for both panels, outside the data area
+        h, l = ax[0].get_legend_handles_labels()
+        fig.legend(h, l, title="H", frameon=False, fontsize=8, loc="center right")
         fig.suptitle(f"Height sweep, res = {res}/µm")
-        fig.tight_layout()
+        fig.tight_layout(rect=(0, 0, 0.9, 1))
         fig.savefig(os.path.join(run_dir, "summary", f"heights_res{res:03d}.png"))
         plt.close(fig)
+        axR.set(xlabel="radius (nm)", ylabel="R", ylim=(0, 1.05),
+                title=f"Reflection, height sweep, res = {res}/µm")
+        axR.legend(title="H", frameon=False, fontsize=8)
+        figR.tight_layout()
+        figR.savefig(os.path.join(run_dir, "summary", f"heights_reflection_res{res:03d}.png"))
+        plt.close(figR)
         np.savetxt(os.path.join(run_dir, "summary", f"heights_res{res:03d}.csv"),
                    np.array(rows), delimiter=",", fmt="%.6f",
                    header="H_nm,phase_span_rad,phase_span_over_2pi,T_min,T_mean,max_abs_RT_minus_1,r_at_T_min_nm")
@@ -397,10 +443,11 @@ def summarize(args, run_dir):
     if len(res_list) >= 2:
         rows = []
         fig, ax = plt.subplots(1, 3, figsize=(15, 4), dpi=150)
-        for H in heights:
+        for k, H in enumerate(heights):
             have = [res for res in res_list if (res, H) in luts]
             if len(have) < 2:
                 continue
+            st = series_style(k)
             rf = have[-1]
             r_f, T_f, _, ph_f, _ = luts[(rf, H)]
             dT, dph, rt, tsub = [], [], [], []
@@ -415,9 +462,9 @@ def summarize(args, run_dir):
                 rt.append(np.max(np.abs(R + T - 1)))
                 tsub.append(abs(norm["T_sub_error"]))
                 rows.append([H * 1e3, res, dT[-1], dph[-1], rt[-1], tsub[-1]])
-            ax[0].plot(have[:-1], dT[:-1], "o-", label=f"H={H*1e3:.0f} nm")
-            ax[1].plot(have[:-1], dph[:-1], "o-")
-            ax[2].plot(have, rt, "o-", label=f"max|R+T-1|, H={H*1e3:.0f}")
+            ax[0].plot(have[:-1], dT[:-1], label=f"H={H*1e3:.0f} nm", **st)
+            ax[1].plot(have[:-1], dph[:-1], **st)
+            ax[2].plot(have, rt, label=f"max|R+T-1|, H={H*1e3:.0f}", **st)
             ax[2].plot(have, tsub, "s--", c=MUTED, label="|T_sub - Fresnel|")
         ax[0].set(xlabel="resolution (px/µm)", ylabel=f"max |T - T(res={res_list[-1]})|",
                   yscale="log", title="Transmission vs finest mesh")
@@ -441,12 +488,11 @@ def summarize(args, run_dir):
             if len(have) < 2:
                 continue
             fig, ax = plt.subplots(1, 2, figsize=(11, 4), dpi=150)
-            cmap = plt.get_cmap("Blues")
             for i, res in enumerate(have):
                 r, T, R, ph, _ = luts[(res, H)]
-                c = cmap(0.35 + 0.65 * i / max(1, len(have) - 1))
-                ax[0].plot(r * 1e3, T, "o-", c=c, lw=1.5, ms=3, label=f"res {res}")
-                ax[1].plot(r * 1e3, ph - ph[0], "o-", c=c, lw=1.5, ms=3)
+                st = series_style(i)
+                ax[0].plot(r * 1e3, T, lw=1.5, ms=4, label=f"res {res}", **st)
+                ax[1].plot(r * 1e3, ph - ph[0], lw=1.5, ms=4, **st)
             ax[0].set(xlabel="radius (nm)", ylabel="T", ylim=(0, 1.05), title="Transmission")
             ax[0].legend(frameon=False, fontsize=7, loc="lower left")
             ax[1].set(xlabel="radius (nm)", ylabel="phase rel. to r_min (rad)", title="Phase")
@@ -461,6 +507,9 @@ def summarize(args, run_dir):
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
+T_START = time.time()
+
+
 def main():
     args = parse_args()
     if args.quiet:
@@ -496,7 +545,9 @@ def main():
     def log(msg):
         if mp.am_master():                       # master of this group
             line = f"{datetime.datetime.now():%H:%M:%S} [g{gid}] {msg}"
-            print(line, flush=True)
+            # Meep redirects sys.stdout to /dev/null on every rank except the
+            # global master; sys.__stdout__ is the real terminal for all ranks.
+            print(line, file=sys.__stdout__, flush=True)
             with open(log_path, "a") as fh:
                 fh.write(line + "\n")
 
@@ -520,10 +571,14 @@ def main():
             f"R+T={rec['RT']:.5f} phase={rec['phase_rad']:+.4f}  "
             f"({rec['wall_s']:.0f}s{', MAX TIME HIT' if rec['hit_max_time'] else ''})")
 
+    log(f"group finished its {len(mine)} simulations; waiting for the other groups")
     if G > 1:
         mp.begin_global_communications()
     barrier()
     if mp.am_really_master():
+        el = time.time() - T_START
+        print(f"{datetime.datetime.now():%H:%M:%S} all {G} groups finished; "
+              f"wall time {el/60:.1f} min", file=sys.__stdout__, flush=True)
         summarize(args, run_dir)
     if G > 1:
         mp.end_global_communications()
