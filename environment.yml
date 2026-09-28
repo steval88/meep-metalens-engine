@@ -1,0 +1,12 @@
+# Recreate with:  conda env create -f environment.yml
+# Linux / WSL only (conda-forge pymeep has no native Windows build).
+name: meep
+channels:
+  - conda-forge
+dependencies:
+  - python
+  - pymeep=1.34.*=mpi_mpich_*   # MPI (MPICH) build; version validated on 2026-09-25
+  - mpi4py                      # required by lut_sweep.py for MPI runs / --groups
+  - numpy
+  - matplotlib
+  - ipykernel                   # VS Code / Jupyter kernel

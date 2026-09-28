@@ -1,0 +1,3 @@
+# keep LF line endings even if files are touched from Windows
+* text=auto eol=lf
+*.png binary

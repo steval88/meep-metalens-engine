@@ -1,0 +1,16 @@
+# simulation output (time-stamped run folders are data, not source)
+runs/
+test_runs/
+*.h5
+# loose outputs of the legacy script
+lut_H*nm_res*.csv
+lut_H*nm_res*.png
+metalens_phase_profile.csv
+metalens_phase_profile.png
+# Python / editors
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.vscode/
+# Windows download metadata (appears when copying files from Windows into WSL)
+*:Zone.Identifier
