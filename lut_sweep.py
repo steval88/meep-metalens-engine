@@ -321,10 +321,38 @@ def series_style(i):
                 ls="-" if i < 8 else "--")
 
 
+def pi_label(v, _pos=None):
+    """Axis label for a value given in units of pi: 0, π/2, π, 3π/2, 2π, ..."""
+    n = int(round(2 * v))
+    if n == 0:
+        return "0"
+    if n % 2 == 0:
+        k = n // 2
+        return "π" if k == 1 else ("−π" if k == -1 else f"{k}π")
+    if n == 1:
+        return "π/2"
+    if n == -1:
+        return "−π/2"
+    return f"{n}π/2".replace("-", "−")
+
+
+def fine_grid(ax, y_minor=True):
+    """Major + minor grid (minor = 1/5 of the major spacing on each axis)."""
+    from matplotlib.ticker import AutoMinorLocator, MultipleLocator
+    ax.xaxis.set_minor_locator(AutoMinorLocator(5))
+    if y_minor:
+        ax.yaxis.set_minor_locator(AutoMinorLocator(5))
+    else:
+        ax.yaxis.set_minor_locator(MultipleLocator(0.25))
+    ax.grid(True, which="major", color="#d6d6d6", lw=0.8)
+    ax.grid(True, which="minor", color="#eeeeee", lw=0.5)
+
+
 def summarize(args, run_dir):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MultipleLocator, FuncFormatter
 
     INK, MUTED, GRID = "#1f1f1f", "#6b6b6b", "#e3e3e3"
     plt.rcParams.update({"axes.spines.top": False, "axes.spines.right": False,
@@ -363,9 +391,6 @@ def summarize(args, run_dir):
             # (a) the LUT itself: transmission and phase
             fig, ax = plt.subplots(1, 2, figsize=(11, 4), dpi=150)
             ax[0].plot(r * 1e3, T, "o-", c=blue, lw=2, ms=5)
-            ax[0].axhline(norm["T_sub"], ls="--", c=MUTED, lw=0.8)
-            ax[0].text(r[0] * 1e3, norm["T_sub"] - 0.02, "bare substrate", color=MUTED,
-                       fontsize=7, va="top")
             ax[0].set(xlabel="radius (nm)", ylabel="T (fraction of incident power)",
                       ylim=(0, 1.05), title="Transmission")
             ax[1].plot(r * 1e3, ph - ph[0], "o-", c=blue, lw=2, ms=5)
@@ -375,9 +400,27 @@ def summarize(args, run_dir):
             if steps.size and steps.max() > 2.5:
                 ax[1].text(0.02, 0.95, "warning: |Δφ| > 2.5 rad between radii - refine dr",
                            transform=ax[1].transAxes, color="#b3261e", fontsize=8, va="top")
+            for a in ax:
+                fine_grid(a)
             fig.suptitle(title)
             fig.tight_layout()
             fig.savefig(os.path.join(out, "lut.png"))
+            plt.close(fig)
+
+            # (a') phase in units of pi (same data, pi-labelled axis)
+            fig, a = plt.subplots(figsize=(6.5, 4.5), dpi=150)
+            a.plot(r * 1e3, (ph - ph[0]) / np.pi, "o-", c=blue, lw=2, ms=5)
+            a.axhline(2, ls="--", c=MUTED, lw=0.8)
+            top = max(2.0, np.ceil(2 * (ph - ph[0]).max() / np.pi) / 2)
+            a.set_ylim(min(0, (ph - ph[0]).min() / np.pi) - 0.1, top + 0.1)
+            a.yaxis.set_major_locator(MultipleLocator(0.5))
+            a.yaxis.set_major_formatter(FuncFormatter(pi_label))
+            a.set(xlabel="radius (nm)", ylabel="phase rel. to r_min",
+                  title="Phase (unwrapped, multiples of π)")
+            fine_grid(a, y_minor=False)
+            fig.suptitle(title, fontsize=10)
+            fig.tight_layout()
+            fig.savefig(os.path.join(out, "lut_phase_pi.png"))
             plt.close(fig)
 
             # (b) reflection and energy-conservation check, separate figure
@@ -395,6 +438,8 @@ def summarize(args, run_dir):
                 ax[1].legend(frameon=False, fontsize=8)
             ax[1].set(xlabel="radius (nm)", ylabel="R + T − 1",
                       title="Energy conservation check (should be ≈ 0)")
+            for a in ax:
+                fine_grid(a)
             fig.suptitle(title)
             fig.tight_layout()
             fig.savefig(os.path.join(out, "lut_reflection.png"))
