@@ -14,3 +14,4 @@ __pycache__/
 .vscode/
 # Windows download metadata (appears when copying files from Windows into WSL)
 *:Zone.Identifier
+layouts/
